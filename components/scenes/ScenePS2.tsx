@@ -31,7 +31,7 @@ const STATS = [
   { name: "Switch",         value: 8, selected: true },
   { name: "Rail Balance",   value: 6 },
   { name: "Lip Balance",    value: 5 },
-  { name: "Manual Balance", value: 6 },
+  { name: "Manual Balance", value: 5 },
   { name: "Grind",          value: 7 },
 ];
 const MAX_DOTS = 10;
