@@ -4,23 +4,34 @@ import type React from "react";
 
 // ─── Webcam (écran) ──────────────────────────────────────────────────────────
 
+// Canvas style for the segmented output (same slot position, no background)
+export const SEG_CANVAS_STYLE: React.CSSProperties = {
+  position: "absolute",
+  top: "5%",
+  right: "8%",
+  width: "35%",
+  height: "80%",
+  display: "block",
+  transform: "scaleX(-1)",
+  zIndex: 1,
+};
+
 export const WEBCAM_STYLE: React.CSSProperties = {
   top: "10%",
-  height: "80vh",
-  width: "25vw",
+  height: "80%",
+  width: "50%",
   position: "absolute",
   right: "12%",
   background: "#000",
-  borderRadius: "16px",
-  borderColor: "orange",
-  borderWidth: "12px",
-  borderStyle: "solid",
 };
 
 // ─── Capture canvas (1080×1920 portrait) ─────────────────────────────────────
 
 // Webcam : même position que WEBCAM_STYLE (right:12%, width:25%, top:10%, height:80%)
 export const WEBCAM_CAPTURE_RECT = { x: 0.63, y: 0.10, w: 0.25, h: 0.80 };
+
+// Décorateur 9:16 superposé sur la capture avant envoi
+export const storyDecorator = "/test_scenePS2.png";
 
 const STATS = [
   { name: "Air",            value: 9 },
@@ -126,8 +137,6 @@ export const drawForCapture: DrawFn = (ctx, w, h) => {
   const vh = WEBCAM_CAPTURE_RECT.h * h;
 
   // Bordure orange — identique à WEBCAM_STYLE (12px, borderRadius 16px)
-  ctx.strokeStyle = "orange";
-  ctx.lineWidth = 12;
   ctx.beginPath();
   ctx.roundRect(vx, vy, vw, vh, 16);
   ctx.stroke();
@@ -146,7 +155,7 @@ function WebcamFrame() {
     <div style={{
       position: "absolute",
       top: "10%", right: "12%",
-      width: "25vw", height: "80vh",
+      width: "25%", height: "80%",
       zIndex: 2, pointerEvents: "none",
       borderRadius: 4,
       background: "repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.10) 3px, rgba(0,0,0,0.10) 4px)",
@@ -156,24 +165,24 @@ function WebcamFrame() {
 
 function StatRow({ name, value }: { name: string; value: number; selected?: boolean }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "3px 12px" }}>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0.3vh 1vh" }}>
       <span style={{
         color: "#fff",
-        fontSize: "clamp(25px, 1.6vw, 50px)",
+        fontSize: "1.6vh",
         fontFamily: "Arial, sans-serif",
         fontWeight: "bold",
         letterSpacing: "0.03em",
         width: "48%",
         textAlign: "right",
-        paddingRight: 12,
+        paddingRight: "0.8vh",
         textShadow: "1px 1px 3px rgba(0,0,0,0.8)",
       }}>
         {name}
       </span>
-      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: "0.5vh", alignItems: "center" }}>
         {Array.from({ length: MAX_DOTS }, (_, i) => (
           <div key={i} style={{
-            width: "30px", height: "30px",
+            width: "1.8vh", height: "1.8vh",
             borderRadius: "50%",
             background: i < value ? "#F5A31A" : "rgba(120,110,100,0.5)",
             boxShadow: i < value ? "0 0 4px rgba(245,163,26,0.6)" : undefined,
@@ -199,23 +208,24 @@ export default function ScenePS2({ captureFlash }: { captureFlash?: boolean }) {
       <WebcamFrame />
 
       <div style={{
-        width: "50%", height: "100vh",
+        width: "50%", height: "100%",
         display: "flex", flexDirection: "column",
-        justifyContent: "center", gap: 16,
-        padding: 32, alignItems: "center",
+        justifyContent: "center", gap: "1.5vh",
+        padding: "2vh 2%", alignItems: "center",
         textTransform: "uppercase",
       }}>
         <div style={{ alignSelf: "start", color: "white", WebkitTextStroke: "1px yellow" }}>
           <h2 style={{
-            fontSize: "50px",
+            fontSize: "3.5vh",
             fontFamily: "Arial Black, Gadget, sans-serif",
             fontWeight: "bold",
             letterSpacing: "-0.02em",
             textShadow: "2px 2px 5px rgba(0,0,0,0.8)",
+            margin: 0,
           }}>
             BOURBIER PARTY Pro Skater 4
           </h2>
-          <p style={{ fontSize: "clamp(16px, 1.5vw, 24px)", fontFamily: "Arial, sans-serif", textShadow: "1px 1px 3px rgba(0,0,0,0.8)" }}>
+          <p style={{ fontSize: "1.6vh", fontFamily: "Arial, sans-serif", textShadow: "1px 1px 3px rgba(0,0,0,0.8)", margin: "0.4vh 0 0" }}>
             Niveau : Point éphémère
           </p>
         </div>
@@ -223,9 +233,9 @@ export default function ScenePS2({ captureFlash }: { captureFlash?: boolean }) {
         <div style={{
           width: "100%",
           background: "rgba(15,15,15,0.72)",
-          padding: "16px",
-          borderRadius: 32,
-          display: "flex", flexDirection: "column", gap: 2,
+          padding: "1vh",
+          borderRadius: "2vh",
+          display: "flex", flexDirection: "column", gap: "0.2vh",
         }}>
           {STATS.map((s) => (
             <StatRow key={s.name} name={s.name} value={s.value} selected={s.selected} />
@@ -233,7 +243,7 @@ export default function ScenePS2({ captureFlash }: { captureFlash?: boolean }) {
         </div>
 
         <div>
-          <NextImage width={500} height={300} src="/bourbier_proskater.png" alt="PS2 Logo" />
+          <NextImage width={220} height={132} src="/bourbier_proskater.png" alt="PS2 Logo" />
         </div>
       </div>
 

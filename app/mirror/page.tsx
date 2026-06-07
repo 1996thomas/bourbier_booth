@@ -5,7 +5,8 @@ import SceneOverlay, { SCENES } from "../../components/SceneOverlay";
 import useControls from "../../hooks/useControls";
 import ControlsUI from "../../components/ControlsUI";
 import QROverlay from "../../components/QROverlay";
-import { captureImage } from "../../lib/capture";
+import { captureFromDOM, composeForStory } from "../../lib/capture";
+import { useSegmentation } from "../../hooks/useSegmentation";
 
 function StatusOverlay({ text, color = "#fff" }: { text: string; color?: string }) {
   return (
@@ -33,33 +34,44 @@ function getInitialAllowed() {
 type CaptureState =
   | { status: "idle" }
   | { status: "uploading" }
-  | { status: "done"; url: string }
+  | { status: "done"; url: string; dataUrl: string; printDataUrl: string }
   | { status: "error" };
 
 export default function MirrorPage() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const [scene, setScene] = useState(0);
+  const currentScene = SCENES[scene];
+  const isSegmented = currentScene.segmented;
+  const segCanvasRef = useSegmentation(videoRef, isSegmented);
   const [flash, setFlash] = useState(false);
   const [capture, setCapture] = useState<CaptureState>({ status: "idle" });
+  const [countdown, setCountdown] = useState<number | null>(null);
   const [allowed] = useState(getInitialAllowed);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const handleNext = () => setScene((s) => (s + 1) % SCENES.length);
   const handlePrev = () => setScene((s) => (s + SCENES.length - 1) % SCENES.length);
 
-  const handleCapture = useCallback(async () => {
-    if (!videoRef.current || capture.status === "uploading") return;
+  const doCapture = useCallback(async (currentScene: number) => {
+    if (!videoRef.current || !stageRef.current) return;
 
-    // Flash visuel
+    const s = SCENES[currentScene];
+    // Segmented scenes: html2canvas captures the canvas element directly — no separate webcam compositing needed
+    const sceneDataUrl = await captureFromDOM(stageRef.current, videoRef.current, {
+      webcamRectFn: s.segmented ? undefined : s.getWebcamRect,
+      webcamRect:   s.segmented ? undefined : s.webcamRect,
+      drawForeground: s.segmented ? undefined : s.draw,
+      unmirror: true,
+    });
+
     setFlash(true);
     setTimeout(() => setFlash(false), 220);
 
-    // Génère le PNG
-    const dataUrl = captureImage(videoRef.current, {
-      drawBackground: SCENES[scene].drawBackground,
-      drawForeground: SCENES[scene].draw,
-      webcamRect:     SCENES[scene].webcamRect,
-      unmirror:       true,
-    });
+    const decorator = s.storyDecorator;
+    const dataUrl = decorator
+      ? await composeForStory(sceneDataUrl, decorator)
+      : sceneDataUrl;
 
     setCapture({ status: "uploading" });
     try {
@@ -70,22 +82,43 @@ export default function MirrorPage() {
       });
       if (!res.ok) throw new Error("Upload failed");
       const { url } = await res.json() as { url: string };
-      setCapture({ status: "done", url });
+      setCapture({ status: "done", url, dataUrl, printDataUrl: sceneDataUrl });
     } catch {
       setCapture({ status: "error" });
       setTimeout(() => setCapture({ status: "idle" }), 3000);
     }
-  }, [capture.status, scene]);
+  }, []);
+
+  const handleCapture = useCallback(() => {
+    if (capture.status !== "idle" || countdown !== null) return;
+
+    const sceneAtTrigger = scene;
+    let count = 3;
+    setCountdown(count);
+
+    intervalRef.current = setInterval(() => {
+      count -= 1;
+      if (count <= 0) {
+        clearInterval(intervalRef.current!);
+        intervalRef.current = null;
+        setCountdown(null);
+        doCapture(sceneAtTrigger);
+      } else {
+        setCountdown(count);
+      }
+    }, 1000);
+  }, [capture.status, countdown, scene, doCapture]);
 
   const handleCloseQR = useCallback(() => {
     setCapture({ status: "idle" });
   }, []);
 
-  // Space/gamepad A ferme aussi le QR overlay
+  const isBusy = countdown !== null || capture.status !== "idle";
+
   useControls({
-    onNext: capture.status === "idle" ? handleNext : undefined,
-    onPrev: capture.status === "idle" ? handlePrev : undefined,
-    onCapture: capture.status === "done" ? handleCloseQR : handleCapture,
+    onNext:    !isBusy ? handleNext    : undefined,
+    onPrev:    !isBusy ? handlePrev    : undefined,
+    onCapture: capture.status === "done" ? handleCloseQR : (!isBusy ? handleCapture : undefined),
   });
 
   if (!allowed) {
@@ -100,18 +133,49 @@ export default function MirrorPage() {
   }
 
   return (
-    <div style={{ width: "100vw", height: "100vh" }}>
-      <div style={{ position: "relative", width: "100%", height: "100%" }}>
-        <Webcam ref={videoRef} style={SCENES[scene].webcam} />
+    <div style={{ width: "100vw", height: "100vh", background: "#000", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div ref={stageRef} data-stage style={{
+        position: "relative",
+        aspectRatio: "4/3",
+        height: "100vh",
+        maxWidth: "calc(100vh * 4 / 3)",
+        overflow: "hidden",
+        flexShrink: 0,
+        isolation: "isolate",
+      }}>
+        <Webcam ref={videoRef} style={{ ...currentScene.webcam, ...(isSegmented ? { opacity: 0 } : {}) }} />
+        {isSegmented && currentScene.segCanvasStyle && (
+          <canvas ref={segCanvasRef} style={currentScene.segCanvasStyle} />
+        )}
         <SceneOverlay sceneIndex={scene} captureFlash={flash} />
         <ControlsUI onNext={handleNext} onPrev={handlePrev} onCapture={handleCapture} />
+
+        {/* Compte à rebours */}
+        {countdown !== null && (
+          <div data-nocapture style={{
+            position: "absolute", inset: 0, zIndex: 20,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            pointerEvents: "none",
+          }}>
+            <span style={{
+              fontSize: "30vw",
+              fontWeight: "bold",
+              fontFamily: "Arial Black, sans-serif",
+              color: "#fff",
+              textShadow: "0 0 40px rgba(0,0,0,0.8), 0 4px 20px rgba(0,0,0,0.6)",
+              lineHeight: 1,
+            }}>
+              {countdown}
+            </span>
+          </div>
+        )}
 
         {capture.status === "uploading" && <StatusOverlay text="Envoi en cours…" />}
         {capture.status === "error"    && <StatusOverlay text="Erreur d'envoi — réessaie" color="#f66" />}
 
         {/* QR code */}
         {capture.status === "done" && (
-          <QROverlay url={capture.url} onClose={handleCloseQR} />
+          <QROverlay url={capture.url} imageDataUrl={capture.dataUrl} printDataUrl={capture.printDataUrl} onClose={handleCloseQR} />
         )}
       </div>
     </div>

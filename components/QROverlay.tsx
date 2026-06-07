@@ -1,15 +1,29 @@
 "use client"
 import { QRCodeSVG } from "qrcode.react";
 import { useEffect, useState } from "react";
+import { openThermalPreview } from "../lib/thermal";
 
 type Props = {
   url: string;
+  imageDataUrl?: string;
+  printDataUrl?: string;
   onClose: () => void;
   autoCloseSec?: number;
 };
 
-export default function QROverlay({ url, onClose, autoCloseSec = 30 }: Props) {
+const BTN: React.CSSProperties = {
+  padding: "10px 28px",
+  border: "1px solid rgba(255,255,255,0.3)",
+  borderRadius: 6,
+  fontSize: 13,
+  cursor: "pointer",
+  letterSpacing: "0.1em",
+  width: "100%",
+};
+
+export default function QROverlay({ url, imageDataUrl, printDataUrl, onClose, autoCloseSec = 30 }: Props) {
   const [remaining, setRemaining] = useState(autoCloseSec);
+  const [preparing, setPreparing] = useState(false);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -21,53 +35,78 @@ export default function QROverlay({ url, onClose, autoCloseSec = 30 }: Props) {
     return () => clearInterval(interval);
   }, [onClose]);
 
+  const handlePrint = () => {
+    const src = printDataUrl ?? imageDataUrl;
+    if (!src || preparing) return;
+    setPreparing(true);
+    openThermalPreview(src).finally(() => setPreparing(false));
+  };
+
   return (
     <div style={{
       position: "absolute",
       inset: 0,
       background: "rgba(0,0,0,0.82)",
       display: "flex",
-      flexDirection: "column",
+      flexDirection: "row",
       alignItems: "center",
       justifyContent: "center",
-      gap: 24,
+      gap: 48,
       zIndex: 10,
     }}>
-      {/* QR code */}
-      <div style={{
-        background: "#fff",
-        padding: 20,
-        borderRadius: 12,
-      }}>
-        <QRCodeSVG value={url} size={220} />
-      </div>
+      {/* Image capturée (portrait 9:16) */}
+      {imageDataUrl && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={imageDataUrl}
+          alt="Capture"
+          style={{
+            height: "80vh",
+            width: "auto",
+            borderRadius: 10,
+            boxShadow: "0 0 40px rgba(0,0,0,0.6)",
+            display: "block",
+          }}
+        />
+      )}
 
-      <div style={{ textAlign: "center", color: "#fff" }}>
-        <p style={{ margin: 0, fontSize: 18, fontWeight: "bold" }}>
-          Scanne pour télécharger ta photo
-        </p>
-        <p style={{ margin: "8px 0 0", fontSize: 13, color: "#aaa" }}>
-          Ferme dans {remaining}s
-        </p>
-      </div>
+      {/* QR + texte + boutons */}
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16 }}>
+        <div style={{ background: "#fff", padding: 20, borderRadius: 12 }}>
+          <QRCodeSVG value={url} size={220} />
+        </div>
 
-      {/* Bouton fermer (pour le mode clavier/gamepad) */}
-      <button
-        onClick={onClose}
-        style={{
-          marginTop: 8,
-          padding: "10px 28px",
-          background: "transparent",
-          border: "1px solid rgba(255,255,255,0.3)",
-          borderRadius: 6,
-          color: "#fff",
-          fontSize: 13,
-          cursor: "pointer",
-          letterSpacing: "0.1em",
-        }}
-      >
-        FERMER  [Space]
-      </button>
+        <div style={{ textAlign: "center", color: "#fff" }}>
+          <p style={{ margin: 0, fontSize: 18, fontWeight: "bold" }}>
+            Scanne pour télécharger ta photo
+          </p>
+          <p style={{ margin: "8px 0 0", fontSize: 13, color: "#aaa" }}>
+            Ferme dans {remaining}s
+          </p>
+        </div>
+
+        {(printDataUrl ?? imageDataUrl) && (
+          <button
+            onClick={handlePrint}
+            disabled={preparing}
+            style={{
+              ...BTN,
+              background: preparing ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.15)",
+              color: preparing ? "#888" : "#fff",
+              cursor: preparing ? "default" : "pointer",
+            }}
+          >
+            {preparing ? "PRÉPARATION…" : "IMPRIMER"}
+          </button>
+        )}
+
+        <button
+          onClick={onClose}
+          style={{ ...BTN, background: "transparent", color: "#fff" }}
+        >
+          FERMER  [Space]
+        </button>
+      </div>
     </div>
   );
 }

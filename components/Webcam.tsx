@@ -13,7 +13,10 @@ const Webcam = forwardRef<HTMLVideoElement, Props>(({ style }, ref) => {
     let currentVideo: HTMLVideoElement | null = null;
     const start = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: false,
+        });
         if (mounted && videoRef.current) {
           videoRef.current.srcObject = stream;
           currentVideo = videoRef.current;
