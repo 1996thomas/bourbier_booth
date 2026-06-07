@@ -1,7 +1,8 @@
 "use client"
 import { QRCodeSVG } from "qrcode.react";
 import { useEffect, useState } from "react";
-import { openThermalPreview } from "../lib/thermal";
+import { buildThermalDataUrl } from "../lib/thermal";
+import { sendToPrinter } from "../lib/printer";
 
 type Props = {
   url: string;
@@ -24,6 +25,7 @@ const BTN: React.CSSProperties = {
 export default function QROverlay({ url, imageDataUrl, printDataUrl, onClose, autoCloseSec = 30 }: Props) {
   const [remaining, setRemaining] = useState(autoCloseSec);
   const [preparing, setPreparing] = useState(false);
+  const [printStatus, setPrintStatus] = useState<"idle" | "sending" | "ok" | "error">("idle");
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -35,11 +37,22 @@ export default function QROverlay({ url, imageDataUrl, printDataUrl, onClose, au
     return () => clearInterval(interval);
   }, [onClose]);
 
-  const handlePrint = () => {
+  const handlePrint = async () => {
     const src = printDataUrl ?? imageDataUrl;
     if (!src || preparing) return;
     setPreparing(true);
-    openThermalPreview(src).finally(() => setPreparing(false));
+    setPrintStatus("sending");
+    try {
+      const thermalDataUrl = await buildThermalDataUrl(src);
+      await sendToPrinter(thermalDataUrl);
+      setPrintStatus("ok");
+    } catch (err) {
+      console.error("Print failed:", err);
+      setPrintStatus("error");
+    } finally {
+      setPreparing(false);
+      setTimeout(() => setPrintStatus("idle"), 3000);
+    }
   };
 
   return (
@@ -96,7 +109,7 @@ export default function QROverlay({ url, imageDataUrl, printDataUrl, onClose, au
               cursor: preparing ? "default" : "pointer",
             }}
           >
-            {preparing ? "PRÉPARATION…" : "IMPRIMER"}
+            {printStatus === "sending" ? "ENVOI…" : printStatus === "ok" ? "ENVOYÉ ✓" : printStatus === "error" ? "ERREUR ✗" : "IMPRIMER"}
           </button>
         )}
 

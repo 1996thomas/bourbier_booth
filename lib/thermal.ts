@@ -59,6 +59,11 @@ async function buildThermalCanvas(dataUrl: string): Promise<HTMLCanvasElement> {
   return canvas;
 }
 
+export async function buildThermalDataUrl(dataUrl: string): Promise<string> {
+  const canvas = await buildThermalCanvas(dataUrl);
+  return canvas.toDataURL("image/png");
+}
+
 // Opens a new tab with the thermal-optimised image and a print button.
 // window.open is called synchronously (inside the user-gesture stack)
 // so popup blockers don't interfere; the image processing happens asynchronously after.
