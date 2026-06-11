@@ -1,7 +1,13 @@
-// 80 mm thermal paper — printable area ≈ 72 mm at 203 dpi → 576 px wide
+import QRCode from "qrcode";
+
+// 80 mm thermal paper — printable area 72 mm at 203 dpi → 576 px wide
 const PRINT_W  = 576;
-const FOOTER_H = 44;   // height of the event text strip at the bottom
-const CONTRAST = 1.45; // > 1 boosts contrast; thermal paper needs stronger blacks
+const CONTRAST = 1.45;
+
+const QR_SIZE    = 220;
+const QR_PAD     = 28;
+const QR_TEXT_H  = 28;
+const QR_TOTAL_H = QR_PAD + QR_SIZE + 10 + QR_TEXT_H + QR_PAD;
 
 function loadImg(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -12,130 +18,103 @@ function loadImg(src: string): Promise<HTMLImageElement> {
   });
 }
 
-async function buildThermalCanvas(dataUrl: string): Promise<HTMLCanvasElement> {
-  const img   = await loadImg(dataUrl);
-  const scale = PRINT_W / img.naturalWidth;
-  const imgH  = Math.round(img.naturalHeight * scale);
-  const total = imgH + FOOTER_H;
-
-  const canvas = document.createElement("canvas");
-  canvas.width  = PRINT_W;
-  canvas.height = total;
-
-  const ctx = canvas.getContext("2d")!;
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-
-  // White base
-  ctx.fillStyle = "#fff";
-  ctx.fillRect(0, 0, PRINT_W, total);
-
-  // Scale image to print width
-  ctx.drawImage(img, 0, 0, PRINT_W, imgH);
-
-  // Convert to grayscale + contrast boost for thermal output.
-  // Thermal paper tends to wash out mid-tones, so we push grays toward black.
-  const id = ctx.getImageData(0, 0, PRINT_W, imgH);
+// Grayscale + contrast boost — thermal paper washes out mid-tones
+function applyThermal(ctx: CanvasRenderingContext2D, w: number, h: number) {
+  const id = ctx.getImageData(0, 0, w, h);
   const d  = id.data;
   for (let i = 0; i < d.length; i += 4) {
-    // Perceptual luminance (ITU-R BT.709)
     let g = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
     g = Math.max(0, Math.min(255, (g - 128) * CONTRAST + 128));
     d[i] = d[i + 1] = d[i + 2] = g;
     d[i + 3] = 255;
   }
   ctx.putImageData(id, 0, 0);
+}
 
-  // Separator line
-  ctx.fillStyle = "#000";
-  ctx.fillRect(0, imgH, PRINT_W, 1);
+// Build the photo section: full width, aspect-ratio preserved, white background
+async function buildPhotoCanvas(photoDataUrl: string, decoratorSrc?: string): Promise<HTMLCanvasElement> {
+  const photoImg = await loadImg(photoDataUrl);
 
-  // Event name footer
-  ctx.font         = `bold ${Math.round(FOOTER_H * 0.42)}px "Arial Black", Arial, sans-serif`;
-  ctx.textAlign    = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("BOURBIER PARTY", PRINT_W / 2, imgH + FOOTER_H / 2);
+  const photoH = Math.round(photoImg.naturalHeight * PRINT_W / photoImg.naturalWidth);
+
+  const canvas = document.createElement("canvas");
+  canvas.width  = PRINT_W;
+  canvas.height = photoH;
+  const ctx = canvas.getContext("2d")!;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, PRINT_W, photoH);
+
+  // Photo at full print width
+  ctx.drawImage(photoImg, 0, 0, PRINT_W, photoH);
+
+  // Decorator overlay at full size (transparent PNG on top)
+  if (decoratorSrc) {
+    const decorImg = await loadImg(decoratorSrc);
+    ctx.drawImage(decorImg, 0, 0, PRINT_W, photoH);
+  }
+
+  applyThermal(ctx, PRINT_W, photoH);
 
   return canvas;
 }
 
-export async function buildThermalDataUrl(dataUrl: string): Promise<string> {
-  const canvas = await buildThermalCanvas(dataUrl);
-  return canvas.toDataURL("image/png");
+export async function buildLabelDataUrl(photoDataUrl: string, qrUrl: string, decoratorSrc?: string): Promise<string> {
+  const [photoCanvas, qrCanvas] = await Promise.all([
+    buildPhotoCanvas(photoDataUrl, decoratorSrc),
+    (async () => {
+      const c = document.createElement("canvas");
+      await QRCode.toCanvas(c, qrUrl, { width: QR_SIZE, margin: 1, color: { dark: "#000000", light: "#ffffff" } });
+      return c;
+    })(),
+  ]);
+
+  const label = document.createElement("canvas");
+  label.width  = PRINT_W;
+  label.height = photoCanvas.height + QR_TOTAL_H;
+
+  const ctx = label.getContext("2d")!;
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, PRINT_W, label.height);
+
+  ctx.drawImage(photoCanvas, 0, 0);
+
+  // Separator
+  ctx.fillStyle = "#ccc";
+  ctx.fillRect(0, photoCanvas.height, PRINT_W, 1);
+
+  // QR centered
+  const qrX = Math.round((PRINT_W - QR_SIZE) / 2);
+  const qrY = photoCanvas.height + QR_PAD;
+  ctx.drawImage(qrCanvas, qrX, qrY);
+
+  // Caption
+  ctx.fillStyle = "#000";
+  ctx.font = "bold 16px Arial, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("Scanne pour télécharger ta photo", PRINT_W / 2, qrY + QR_SIZE + 10 + QR_TEXT_H / 2);
+
+  return label.toDataURL("image/png");
 }
 
-// Opens a new tab with the thermal-optimised image and a print button.
-// window.open is called synchronously (inside the user-gesture stack)
-// so popup blockers don't interfere; the image processing happens asynchronously after.
-export function openThermalPreview(dataUrl: string): Promise<void> {
-  const win = window.open("", "_blank");
-  if (!win) return Promise.resolve();
+export async function buildThermalDataUrl(dataUrl: string): Promise<string> {
+  const img   = await loadImg(dataUrl);
+  const imgH  = Math.round(img.naturalHeight * PRINT_W / img.naturalWidth);
 
-  // Immediate loading screen — keeps the tab alive while we process
-  win.document.write(
-    `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>` +
-    `body{background:#666;display:flex;align-items:center;justify-content:center;` +
-    `min-height:100vh;margin:0;font-family:Arial,sans-serif;color:#fff;` +
-    `font-size:15px;letter-spacing:.12em}</style></head>` +
-    `<body>PRÉPARATION…</body></html>`
-  );
-  win.document.close();
+  const canvas = document.createElement("canvas");
+  canvas.width  = PRINT_W;
+  canvas.height = imgH;
+  const ctx = canvas.getContext("2d")!;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
 
-  return buildThermalCanvas(dataUrl).then((canvas) => {
-    if (win.closed) return;
-    const printDataUrl = canvas.toDataURL("image/png");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, PRINT_W, imgH);
+  ctx.drawImage(img, 0, 0, PRINT_W, imgH);
+  applyThermal(ctx, PRINT_W, imgH);
 
-    win.document.open();
-    win.document.write(`<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Impression — Bourbier Party</title>
-  <style>
-    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-    body{
-      background:#666;
-      display:flex;flex-direction:column;align-items:center;
-      min-height:100vh;padding:32px 16px;gap:20px;
-      font-family:Arial,sans-serif;
-    }
-    .label{
-      color:#fff;font-size:11px;letter-spacing:.12em;
-      text-transform:uppercase;opacity:.7;
-    }
-    .paper{
-      background:#fff;padding:6px;
-      box-shadow:0 8px 40px rgba(0,0,0,.55);
-    }
-    .paper img{display:block;width:302px} /* 80 mm at 96 dpi CSS */
-    .actions{display:flex;gap:12px;margin-top:4px}
-    button{
-      padding:11px 28px;font-size:13px;font-weight:bold;
-      letter-spacing:.08em;cursor:pointer;border:none;border-radius:4px;
-    }
-    .btn-print{background:#111;color:#fff}
-    .btn-print:hover{background:#333}
-    .btn-close{background:#fff;color:#111;border:1px solid #ccc}
-    @media print{
-      body{background:#fff;padding:0;gap:0;justify-content:flex-start}
-      .label,.actions{display:none}
-      .paper{box-shadow:none;padding:0}
-      .paper img{width:72mm} /* printable area on 80 mm paper */
-    }
-  </style>
-</head>
-<body>
-  <p class="label">Aperçu impression thermique &middot; 80 mm</p>
-  <div class="paper">
-    <img src="${printDataUrl}" alt="Impression thermique">
-  </div>
-  <div class="actions">
-    <button class="btn-print" onclick="window.print()">Imprimer</button>
-    <button class="btn-close" onclick="window.close()">Fermer</button>
-  </div>
-</body>
-</html>`);
-    win.document.close();
-  });
+  return canvas.toDataURL("image/png");
 }

@@ -1,13 +1,14 @@
 "use client"
 import { QRCodeSVG } from "qrcode.react";
 import { useEffect, useState } from "react";
-import { buildThermalDataUrl } from "../lib/thermal";
+import { buildLabelDataUrl } from "../lib/thermal";
 import { sendToPrinter } from "../lib/printer";
 
 type Props = {
   url: string;
   imageDataUrl?: string;
   printDataUrl?: string;
+  decoratorSrc?: string;
   onClose: () => void;
   autoCloseSec?: number;
 };
@@ -22,20 +23,21 @@ const BTN: React.CSSProperties = {
   width: "100%",
 };
 
-export default function QROverlay({ url, imageDataUrl, printDataUrl, onClose, autoCloseSec = 30 }: Props) {
+export default function QROverlay({ url, imageDataUrl, printDataUrl, decoratorSrc, onClose, autoCloseSec = 30 }: Props) {
   const [remaining, setRemaining] = useState(autoCloseSec);
   const [preparing, setPreparing] = useState(false);
   const [printStatus, setPrintStatus] = useState<"idle" | "sending" | "ok" | "error">("idle");
 
   useEffect(() => {
     const interval = setInterval(() => {
-      setRemaining((s) => {
-        if (s <= 1) { onClose(); return 0; }
-        return s - 1;
-      });
+      setRemaining((s) => (s <= 1 ? 0 : s - 1));
     }, 1000);
     return () => clearInterval(interval);
-  }, [onClose]);
+  }, []);
+
+  useEffect(() => {
+    if (remaining === 0) onClose();
+  }, [remaining, onClose]);
 
   const handlePrint = async () => {
     const src = printDataUrl ?? imageDataUrl;
@@ -43,7 +45,7 @@ export default function QROverlay({ url, imageDataUrl, printDataUrl, onClose, au
     setPreparing(true);
     setPrintStatus("sending");
     try {
-      const thermalDataUrl = await buildThermalDataUrl(src);
+      const thermalDataUrl = await buildLabelDataUrl(src, url, decoratorSrc);
       await sendToPrinter(thermalDataUrl);
       setPrintStatus("ok");
     } catch (err) {

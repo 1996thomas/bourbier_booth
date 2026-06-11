@@ -191,7 +191,7 @@ export function drawForCapture(ctx: CanvasRenderingContext2D, w: number, h: numb
 // ─── React component ──────────────────────────────────────────────────────────
 const TOOLBAR_ICONS = ["👤", "📁", "🎬", "↩", "🎥", "⚙️", "🚫"];
 
-export default function SceneMSN({ captureFlash }: { captureFlash?: boolean }) {
+export default function SceneMSN({ captureFlash }: { captureFlash?: boolean; segCanvasRef?: import("react").RefObject<HTMLCanvasElement | null> }) {
   const slotRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

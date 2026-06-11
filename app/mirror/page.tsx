@@ -1,12 +1,14 @@
 "use client"
-import { useRef, useState, useCallback } from "react";
+import { useRef, useState, useCallback, useEffect } from "react";
+import { useSearchParams } from "next/navigation";
 import Webcam from "../../components/Webcam";
 import SceneOverlay, { SCENES } from "../../components/SceneOverlay";
 import useControls from "../../hooks/useControls";
 import ControlsUI from "../../components/ControlsUI";
 import QROverlay from "../../components/QROverlay";
-import { captureFromDOM, composeForStory } from "../../lib/capture";
+import { captureFromDOM, captureSegmented, composeForStory } from "../../lib/capture";
 import { useSegmentation } from "../../hooks/useSegmentation";
+import { useCameraDevices } from "../../hooks/useCameraDevices";
 
 function StatusOverlay({ text, color = "#fff" }: { text: string; color?: string }) {
   return (
@@ -21,20 +23,10 @@ function StatusOverlay({ text, color = "#fff" }: { text: string; color?: string 
   );
 }
 
-function getInitialAllowed() {
-  const envToken = process.env.NEXT_PUBLIC_MIRROR_TOKEN;
-  if (!envToken || typeof window === "undefined") return true;
-  try {
-    return new URLSearchParams(window.location.search).get("token") === envToken;
-  } catch {
-    return false;
-  }
-}
-
 type CaptureState =
   | { status: "idle" }
   | { status: "uploading" }
-  | { status: "done"; url: string; dataUrl: string; printDataUrl: string }
+  | { status: "done"; url: string; dataUrl: string; printDataUrl: string; decoratorSrc?: string }
   | { status: "error" };
 
 export default function MirrorPage() {
@@ -43,11 +35,27 @@ export default function MirrorPage() {
   const [scene, setScene] = useState(0);
   const currentScene = SCENES[scene];
   const isSegmented = currentScene.segmented;
+  const { cameras, reenumerate } = useCameraDevices();
+  const cameraDeviceId = cameras[currentScene.cameraIndex]?.deviceId;
+
+  // Log every time the scene or resolved camera changes
+  console.log(`[MirrorPage] scene=${currentScene.name} cameraIndex=${currentScene.cameraIndex} cameras.length=${cameras.length} → deviceId=${cameraDeviceId ?? "undefined"}`);
+
+  // Re-enumerate once the first stream is ready (labels are only available after getUserMedia)
+  const hasEnumerated = cameras.length > 0 && cameras[0]?.label?.includes("no label") === false;
+  useEffect(() => {
+    if (!hasEnumerated) {
+      const t = setTimeout(reenumerate, 1500);
+      return () => clearTimeout(t);
+    }
+  }, [hasEnumerated, reenumerate]);
   const segCanvasRef = useSegmentation(videoRef, isSegmented);
   const [flash, setFlash] = useState(false);
   const [capture, setCapture] = useState<CaptureState>({ status: "idle" });
   const [countdown, setCountdown] = useState<number | null>(null);
-  const [allowed] = useState(getInitialAllowed);
+  const searchParams = useSearchParams();
+  const envToken = process.env.NEXT_PUBLIC_MIRROR_TOKEN;
+  const allowed = !envToken || searchParams.get("token") === envToken;
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const handleNext = () => setScene((s) => (s + 1) % SCENES.length);
@@ -57,13 +65,29 @@ export default function MirrorPage() {
     if (!videoRef.current || !stageRef.current) return;
 
     const s = SCENES[currentScene];
-    // Segmented scenes: html2canvas captures the canvas element directly — no separate webcam compositing needed
-    const sceneDataUrl = await captureFromDOM(stageRef.current, videoRef.current, {
-      webcamRectFn: s.segmented ? undefined : s.getWebcamRect,
-      webcamRect:   s.segmented ? undefined : s.webcamRect,
-      drawForeground: s.segmented ? undefined : s.draw,
-      unmirror: true,
-    });
+
+    let sceneDataUrl: string;
+    if (s.segmented) {
+      const segCanvas = segCanvasRef.current;
+      if (!segCanvas) return;
+      sceneDataUrl = captureSegmented({
+        segCanvas,
+        segCanvasRect:  s.segCanvasRect,
+        headClip:       s.getLiveHeadClip?.() ?? s.headClip,
+        headSvgPath:    s.headSvgPath,
+        headSvgVbW:     s.headSvgVbW,
+        headSvgVbH:     s.headSvgVbH,
+        drawBackground: s.drawBackground,
+        drawForeground: s.draw,
+      });
+    } else {
+      sceneDataUrl = await captureFromDOM(stageRef.current, videoRef.current, {
+        webcamRectFn: s.getWebcamRect,
+        webcamRect:   s.webcamRect,
+        drawForeground: s.draw,
+        unmirror: true,
+      });
+    }
 
     setFlash(true);
     setTimeout(() => setFlash(false), 220);
@@ -82,12 +106,12 @@ export default function MirrorPage() {
       });
       if (!res.ok) throw new Error("Upload failed");
       const { url } = await res.json() as { url: string };
-      setCapture({ status: "done", url, dataUrl, printDataUrl: sceneDataUrl });
+      setCapture({ status: "done", url, dataUrl, printDataUrl: sceneDataUrl, decoratorSrc: s.storyDecorator });
     } catch {
       setCapture({ status: "error" });
       setTimeout(() => setCapture({ status: "idle" }), 3000);
     }
-  }, []);
+  }, [segCanvasRef]);
 
   const handleCapture = useCallback(() => {
     if (capture.status !== "idle" || countdown !== null) return;
@@ -143,11 +167,8 @@ export default function MirrorPage() {
         flexShrink: 0,
         isolation: "isolate",
       }}>
-        <Webcam ref={videoRef} style={{ ...currentScene.webcam, ...(isSegmented ? { opacity: 0 } : {}) }} />
-        {isSegmented && currentScene.segCanvasStyle && (
-          <canvas ref={segCanvasRef} style={currentScene.segCanvasStyle} />
-        )}
-        <SceneOverlay sceneIndex={scene} captureFlash={flash} />
+        <Webcam ref={videoRef} deviceId={cameraDeviceId} style={{ ...currentScene.webcam, ...(isSegmented ? { opacity: 0 } : {}) }} />
+        <SceneOverlay sceneIndex={scene} captureFlash={flash} segCanvasRef={isSegmented ? segCanvasRef : undefined} />
         <ControlsUI onNext={handleNext} onPrev={handlePrev} onCapture={handleCapture} />
 
         {/* Compte à rebours */}
@@ -175,7 +196,7 @@ export default function MirrorPage() {
 
         {/* QR code */}
         {capture.status === "done" && (
-          <QROverlay url={capture.url} imageDataUrl={capture.dataUrl} printDataUrl={capture.printDataUrl} onClose={handleCloseQR} />
+          <QROverlay url={capture.url} imageDataUrl={capture.dataUrl} printDataUrl={capture.printDataUrl} decoratorSrc={capture.decoratorSrc} onClose={handleCloseQR} />
         )}
       </div>
     </div>

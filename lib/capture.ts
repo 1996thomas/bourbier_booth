@@ -148,6 +148,90 @@ export async function captureFromDOM(
   return canvas.toDataURL("image/jpeg", 0.93);
 }
 
+// Pure-canvas capture for segmented scenes — no html2canvas.
+// Pipeline: white fill → drawBackground → segmented person → drawForeground.
+// The seg canvas pixels are in camera orientation (CSS scaleX(-1) is display-only).
+export function captureSegmented(options: {
+  segCanvas: HTMLCanvasElement;
+  segCanvasRect?: { x: number; y: number; w: number; h: number };
+  headClip?: { x: number; y: number; w: number; h: number };
+  headSvgPath?: string;
+  headSvgVbW?: number;
+  headSvgVbH?: number;
+  drawBackground?: SceneDrawFn;
+  drawForeground?: SceneDrawFn;
+}): string {
+  const { segCanvas, segCanvasRect, headClip, headSvgPath, headSvgVbW, headSvgVbH, drawBackground, drawForeground } = options;
+  const W = 2880, H = 2160;
+
+  const canvas = document.createElement("canvas");
+  canvas.width  = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d")!;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, W, H);
+
+  drawBackground?.(ctx, W, H);
+
+  // The seg canvas is displayed with CSS scaleX(-1) (mirror view).
+  // Raw pixels are in camera orientation so we flip when compositing.
+  const r  = segCanvasRect ?? { x: 0, y: 0, w: 1, h: 1 };
+  const dx = r.x * W, dy = r.y * H, dw = r.w * W, dh = r.h * H;
+
+  if (headClip) {
+    // Use a temp canvas: clip to shape first (in visual space), then draw the
+    // seg canvas flipped. Both use the same coordinate space so the result
+    // is identical to the CSS clipPath + scaleX(-1) display.
+    const tmp = document.createElement("canvas");
+    tmp.width  = dw;
+    tmp.height = dh;
+    const tc = tmp.getContext("2d")!;
+    tc.imageSmoothingEnabled = true;
+    tc.imageSmoothingQuality = "high";
+
+    const maskX = headClip.x * dw;
+    const maskY = headClip.y * dh;
+    const maskW = headClip.w * dw;
+    const maskH = headClip.h * dh;
+
+    // 1. Clip to shape (visual-space coords match headClip directly)
+    if (headSvgPath && headSvgVbW && headSvgVbH) {
+      const scaled = new Path2D();
+      scaled.addPath(new Path2D(headSvgPath), {
+        a: maskW / headSvgVbW, b: 0, c: 0,
+        d: maskH / headSvgVbH,
+        e: maskX, f: maskY,
+      });
+      tc.clip(scaled);
+    } else {
+      tc.beginPath();
+      tc.ellipse(maskX + maskW / 2, maskY + maskH / 2, maskW / 2, maskH / 2, 0, 0, Math.PI * 2);
+      tc.clip();
+    }
+
+    // 2. Draw seg canvas flipped into visual space (matches CSS scaleX(-1))
+    tc.translate(dw, 0);
+    tc.scale(-1, 1);
+    tc.drawImage(segCanvas, 0, 0, dw, dh);
+
+    // 3. Blit onto main canvas
+    ctx.drawImage(tmp, dx, dy);
+  } else {
+    ctx.save();
+    ctx.translate(dx + dw, dy);
+    ctx.scale(-1, 1);
+    ctx.drawImage(segCanvas, 0, 0, dw, dh);
+    ctx.restore();
+  }
+
+  drawForeground?.(ctx, W, H);
+
+  return canvas.toDataURL("image/jpeg", 0.93);
+}
+
 // Compose la scène paysage dans un canvas 9:16 (1080×1920) avec décorateur
 export async function composeForStory(
   sceneDataUrl: string,

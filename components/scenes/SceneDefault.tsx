@@ -10,7 +10,7 @@ export const WEBCAM_STYLE: React.CSSProperties = {
 type DrawFn = (ctx: CanvasRenderingContext2D, w: number, h: number) => void;
 export const drawForCapture: DrawFn = () => {};
 
-export default function SceneDefault({ captureFlash }: { captureFlash?: boolean }) {
+export default function SceneDefault({ captureFlash }: { captureFlash?: boolean; segCanvasRef?: React.RefObject<HTMLCanvasElement | null> }) {
   return (
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
       {captureFlash && (

@@ -1,6 +1,27 @@
 "use client";
 import { useEffect, useRef } from "react";
 
+// ─── Tuning constants ────────────────────────────────────────────────────────
+
+// Temporal EMA: portion of the previous smoothed mask kept each frame.
+const EMA_ALPHA = 0.6;
+
+// Edge feathering: Gaussian blur applied to the alpha mask in output-canvas px.
+const FEATHER_PX = 4;
+
+// Soft lower threshold after EMA — collapses fringe noise to 0.
+const ALPHA_THRESHOLD = 0.12;
+
+// Resolution of the pre-crop canvas fed to the model.
+// Must match the slot's AR; width is fixed, height is derived each frame.
+const PROC_W = 256;
+
+// ─── Asset paths (served from our own domain — no external CDN calls) ────────
+const WASM_PATH  = "/mediapipe/";
+const MODEL_PATH = "/models/selfie_multiclass_256x256.tflite";
+
+// ─── Hook ────────────────────────────────────────────────────────────────────
+
 export function useSegmentation(
   videoRef: React.RefObject<HTMLVideoElement | null>,
   enabled: boolean
@@ -9,18 +30,31 @@ export function useSegmentation(
 
   useEffect(() => {
     if (!enabled) return;
-
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext("2d")!;
     let animId: number;
-    let active      = true;
-    let pendingSend = false;
-    let lastSegAt   = 0;
-    const SEG_INTERVAL = 1000 / 20; // cap at 20 fps
+    let active = true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let segmenter: any = null;
 
-    // DPR capped at 1 — no Retina overhead on a dedicated screen
+    // Pre-crop canvas: the video frame cover-cropped to the slot's AR
+    // before being handed to the segmenter. Ensures the mask geometry
+    // matches what is actually displayed.
+    let procCanvas: HTMLCanvasElement | null = null;
+    let procCtx: CanvasRenderingContext2D | null = null;
+
+    // Mask-side buffers — allocated once, regrown only on dimension change
+    let maskCanvas: OffscreenCanvas | null = null;
+    let maskCtx: OffscreenCanvasRenderingContext2D | null = null;
+    let smoothedMask: Float32Array | null = null;
+    let rgbaBuffer: Uint8ClampedArray<ArrayBuffer> | null = null;
+    let maskReady = false;
+    let lastVideoTime = -1;
+
+    const ctx = canvas.getContext("2d", { alpha: true })!;
+
+    // Keep the output canvas bitmap size in sync with its CSS layout slot
     const syncSize = () => {
       const w = Math.round(canvas.clientWidth);
       const h = Math.round(canvas.clientHeight);
@@ -33,90 +67,149 @@ export function useSegmentation(
     const ro = new ResizeObserver(syncSize);
     ro.observe(canvas);
 
-    // Temp canvas for mask blur — reused across frames, recreated only on size change
-    let tmpCanvas: OffscreenCanvas | null = null;
-    let tmpCtx: OffscreenCanvasRenderingContext2D | null = null;
+    // Cover-crop: returns the source rect centred on the video that fills the
+    // target slot without letterboxing. Used for both inference input and final
+    // compositing so geometry stays identical between the two.
+    function coverCrop(
+      srcW: number, srcH: number, slotW: number, slotH: number
+    ): { sx: number; sy: number; sw: number; sh: number } {
+      const slotAr = slotW / slotH;
+      const srcAr  = srcW  / srcH;
+      let sx = 0, sy = 0, sw = srcW, sh = srcH;
+      if (srcAr > slotAr) {
+        sw = Math.floor(sh * slotAr);
+        sx = Math.floor((srcW - sw) / 2);
+      } else {
+        sh = Math.floor(sw / slotAr);
+        sy = Math.floor((srcH - sh) / 2);
+      }
+      return { sx, sy, sw, sh };
+    }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let seg: any = null;
-
+    // ── Initialisation ───────────────────────────────────────────────────────
     const init = async () => {
-      const { SelfieSegmentation } = await import("@mediapipe/selfie_segmentation");
+      try {
+        const { ImageSegmenter, FilesetResolver } =
+          await import("@mediapipe/tasks-vision");
 
-      seg = new SelfieSegmentation({
-        locateFile: (f: string) =>
-          `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${f}`,
-      });
+        const vision = await FilesetResolver.forVisionTasks(WASM_PATH);
 
-      seg.setOptions({ modelSelection: 1 });
+        const baseOpts = (delegate: "GPU" | "CPU") => ({
+          baseOptions: { modelAssetPath: MODEL_PATH, delegate },
+          runningMode: "VIDEO" as const,
+          outputCategoryMask:    false,
+          outputConfidenceMasks: true,
+        });
 
-      seg.onResults(({ segmentationMask, image }: {
-        segmentationMask: CanvasImageSource;
-        image: CanvasImageSource;
-      }) => {
-        if (!active) return;
-        pendingSend = false;
-
-        const cw = canvas.width;
-        const ch = canvas.height;
-        if (!cw || !ch) return;
-
-        const video = videoRef.current;
-        const srcW  = video?.videoWidth  || 640;
-        const srcH  = video?.videoHeight || 480;
-
-        // Cover-crop: same region for both image and mask → they stay aligned
-        const slotAr = cw / ch;
-        const srcAr  = srcW / srcH;
-        let sx = 0, sy = 0, sw = srcW, sh = srcH;
-        if (srcAr > slotAr) {
-          sw = Math.floor(sh * slotAr);
-          sx = Math.floor((srcW - sw) / 2);
-        } else {
-          sh = Math.floor(sw / slotAr);
-          sy = Math.floor((srcH - sh) / 2);
+        try {
+          segmenter = await ImageSegmenter.createFromOptions(vision, baseOpts("GPU"));
+          console.log("[Segmentation] MediaPipe ready — GPU delegate");
+        } catch {
+          segmenter = await ImageSegmenter.createFromOptions(vision, baseOpts("CPU"));
+          console.log("[Segmentation] MediaPipe ready — CPU/WASM delegate");
         }
 
-        // Draw video frame
-        ctx.clearRect(0, 0, cw, ch);
-        ctx.drawImage(image, sx, sy, sw, sh, 0, 0, cw, ch);
-        const imgData = ctx.getImageData(0, 0, cw, ch);
+        if (!active) { segmenter.close(); return; }
 
-        // Reuse temp canvas — only reallocate when the canvas size changes
-        if (!tmpCanvas || tmpCanvas.width !== cw || tmpCanvas.height !== ch) {
-          tmpCanvas = new OffscreenCanvas(cw, ch);
-          tmpCtx    = tmpCanvas.getContext("2d")!;
-        }
-        tmpCtx!.clearRect(0, 0, cw, ch);
-        tmpCtx!.filter = `blur(${Math.max(1, Math.round(cw * 0.003))}px)`;
-        tmpCtx!.drawImage(segmentationMask, sx, sy, sw, sh, 0, 0, cw, ch);
-        tmpCtx!.filter = "none";
-        const maskData = tmpCtx!.getImageData(0, 0, cw, ch);
+        // ── Frame loop ───────────────────────────────────────────────────────
+        const loop = () => {
+          if (!active) return;
 
-        for (let i = 0; i < imgData.data.length; i += 4) {
-          const t      = maskData.data[i] / 255;
-          const c      = Math.max(0, Math.min(1, (t - 0.5) * 1 + 0.5));
-          const smooth = c * c * (3 - 2 * c);
-          imgData.data[i + 3] = Math.round(smooth * 255);
-        }
-        ctx.putImageData(imgData, 0, 0);
-      });
-
-      const loop = () => {
-        if (!active) return;
-        const now = performance.now();
-        if (!pendingSend && now - lastSegAt >= SEG_INTERVAL) {
           const video = videoRef.current;
-          if (video && video.readyState >= 2) {
-            lastSegAt   = now;
-            pendingSend = true;
-            seg.send({ image: video }).catch(() => { pendingSend = false; });
+          if (!video || video.readyState < 2) {
+            animId = requestAnimationFrame(loop);
+            return;
           }
-        }
-        animId = requestAnimationFrame(loop);
-      };
 
-      if (active) animId = requestAnimationFrame(loop);
+          const cw = canvas.width;
+          const ch = canvas.height;
+          if (!cw || !ch) { animId = requestAnimationFrame(loop); return; }
+
+          const srcW = video.videoWidth  || 640;
+          const srcH = video.videoHeight || 480;
+
+          // ── Inference (only when a new video frame is available) ─────────
+          if (video.currentTime !== lastVideoTime) {
+            lastVideoTime = video.currentTime;
+
+            // Pre-crop the video to the exact slot AR before inference.
+            // Without this, MediaPipe squishes the full 16:9 frame to a 1:1
+            // square, producing a mask that is horizontally compressed relative
+            // to the 4:3 region actually displayed.
+            const { sx, sy, sw, sh } = coverCrop(srcW, srcH, cw, ch);
+            const procH = Math.round(PROC_W * ch / cw);
+
+            if (!procCanvas) {
+              procCanvas = document.createElement("canvas");
+              procCtx    = procCanvas.getContext("2d")!;
+            }
+            if (procCanvas.width !== PROC_W || procCanvas.height !== procH) {
+              procCanvas.width  = PROC_W;
+              procCanvas.height = procH;
+              smoothedMask = null; // reset temporal state on AR change
+            }
+            procCtx!.drawImage(video, sx, sy, sw, sh, 0, 0, PROC_W, procH);
+
+            const result = segmenter.segmentForVideo(procCanvas, performance.now());
+            const masks  = result.confidenceMasks;
+
+            if (masks && masks.length > 0) {
+              // Class 0 = background. Person alpha = 1 − background confidence.
+              // The multiclass model captures hair/skin/clothes separately;
+              // inverting class-0 merges them all in one step.
+              const bgFloat = masks[0].getAsFloat32Array();
+              const len     = bgFloat.length;
+              const maskW   = masks[0].width;
+              const maskH   = masks[0].height;
+
+              if (!smoothedMask || smoothedMask.length !== len) {
+                smoothedMask = new Float32Array(len);
+                rgbaBuffer   = new Uint8ClampedArray(len * 4);
+                maskCanvas   = new OffscreenCanvas(maskW, maskH);
+                maskCtx      = maskCanvas.getContext("2d") as OffscreenCanvasRenderingContext2D;
+              }
+
+              // EMA temporal smoothing + soft threshold + RGBA packing
+              for (let i = 0; i < len; i++) {
+                const raw = 1 - bgFloat[i];
+                smoothedMask![i] = EMA_ALPHA * smoothedMask![i] + (1 - EMA_ALPHA) * raw;
+                const a = Math.max(0, (smoothedMask![i] - ALPHA_THRESHOLD) / (1 - ALPHA_THRESHOLD));
+                rgbaBuffer![i * 4]     = 255;
+                rgbaBuffer![i * 4 + 1] = 255;
+                rgbaBuffer![i * 4 + 2] = 255;
+                rgbaBuffer![i * 4 + 3] = Math.min(255, Math.round(a * 255));
+              }
+
+              maskCtx!.putImageData(new ImageData(rgbaBuffer!, maskW, maskH), 0, 0);
+              maskReady = true;
+            }
+
+            result.close();
+          }
+
+          // ── Composition ──────────────────────────────────────────────────
+          const { sx, sy, sw, sh } = coverCrop(srcW, srcH, cw, ch);
+
+          ctx.clearRect(0, 0, cw, ch);
+          // CSS transform: scaleX(-1) on the canvas element handles mirroring
+          ctx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
+
+          if (maskReady && maskCanvas) {
+            ctx.save();
+            ctx.filter = `blur(${FEATHER_PX}px)`;
+            ctx.globalCompositeOperation = "destination-in";
+            ctx.drawImage(maskCanvas as unknown as CanvasImageSource, 0, 0, cw, ch);
+            ctx.restore();
+          }
+
+          animId = requestAnimationFrame(loop);
+        };
+
+        animId = requestAnimationFrame(loop);
+
+      } catch (e) {
+        console.error("[Segmentation] Init failed:", e);
+      }
     };
 
     init();
@@ -125,7 +218,8 @@ export function useSegmentation(
       active = false;
       cancelAnimationFrame(animId);
       ro.disconnect();
-      try { seg?.close(); } catch {}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (segmenter as any)?.close?.();
     };
   }, [enabled, videoRef]);
 
