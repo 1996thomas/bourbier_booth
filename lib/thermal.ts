@@ -2,7 +2,7 @@ import QRCode from "qrcode";
 
 // 80 mm thermal paper — printable area 72 mm at 203 dpi → 576 px wide
 const PRINT_W  = 576;
-const CONTRAST = 1.45;
+const CONTRAST = 1.1;
 
 const QR_SIZE    = 220;
 const QR_PAD     = 28;
